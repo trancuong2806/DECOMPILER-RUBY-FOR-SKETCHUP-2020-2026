@@ -74,3 +74,86 @@ Bộ dịch ngược hoạt động dựa trên cơ chế phân tích tĩnh kế
 ### 4.3. Đảm Bảo Tính Trong Suốt (Transparent Execution)
 * Sau khi trích xuất và ghi log, dumper gọi lại hàm gốc thông qua con trỏ `original_rb_iseq_eval(iseq)`.
 * Điều này giúp quá trình trích xuất hoàn toàn trong suốt, không làm gián đoạn hay crash máy ảo Ruby, cho phép plugin chạy bình thường trong khi toàn bộ mã nguồn ẩn của nó bị lộ ra ở dạng assembly.
+
+---
+
+# RUBY DECOMPILER FOR SKETCHUP RUBY 2.7
+# Reverse Engineering & Source Code Recovery Project for SketchUp Plugins Using rubyencoder (Not Applicable for .rbe Files)
+
+This project focuses on decompiling Ruby YARV 2.7 bytecode, recovering the complete logic source code of SketchUp plugins, and performing automated static testing processes to ensure the code is syntax-error-free (`Syntax OK`) and properly complies with the SketchUp API.
+
+---
+
+## 1. Project Structure
+### 🛠️ Core Decompilation & Optimization Toolkit
+* **decompiler.py**: The central decompiler, which simulates the stack of the Ruby VM 2.7 YARV and converts bytecode back into the corresponding Ruby source code.
+* **auto_decompile.py**: An automated script that scans, dumps bytecode, and batch-decompiles all encrypted `.rb` files within the plugin.
+* **replace_decompiled.py**: An automated script that synchronizes the decompiled Ruby files from the temporary directory to the main working codebase.
+
+---
+
+## 2. Decompilation & Synchronization Workflow
+* Requires installation of [Ruby+Devkit 2.7.0-1 (x64)](https://release-assets.githubusercontent.com/github-production-release-asset/78153411/386bbd80-2fc1-11ea-9af0-091632fb975f?sp=r&sv=2018-11-09&sr=b&spr=https&se=2026-06-16T07%3A00%3A02Z&rscd=attachment%3B+filename%3Drubyinstaller-devkit-2.7.0-1-x64.exe&rsct=application%2Foctet-stream&skoid=96c2d410-5711-43a1-aedd-ab1947aa7ab0&sktid=398a6654-997b-47e9-b12b-9515b896b4de&skt=2026-06-16T05%3A59%3A33Z&ske=2026-06-16T07%3A00%3A02Z&sks=b&skv=2018-11-09&sig=CVd9XAUm8YzPVXKpOre1KBSw4c3Hbg7V%2Fm50eFDy%2FQY%3D&jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmVsZWFzZS1hc3NldHMuZ2l0aHVidXNlcmNvbnRlbnQuY29tIiwia2V5Ijoia2V5MSIsImV4cCI6MTc4MTU5NDcwNywibmJmIjoxNzgxNTkxMTA3LCJwYXRoIjoicmVsZWFzZWFzc2V0cHJvZHVjdGlvbi5ibG9iLmNvcmUud2luZG93cy5uZXQifQ.yiIlqfPdfaN68Por4Dk427KEKa2Jq1NZWv8yTW_pAfI&response-content-disposition=attachment%3B%20filename%3Drubyinstaller-devkit-2.7.0-1-x64.exe&response-content-type=application%2Foctet-stream)
+* To perform decompilation from the original bytecode to complete Ruby source code, open the **auto_decompiler.py** file and edit `TARGET_DIR` and `RUBY_PATH`:
+
+```python
+RUBY_PATH = r"D:\Ruby27-x64\bin\ruby.exe" # Select the ruby installation path
+TARGET_DIR = r"" # Target Plugin e.g.: MyPlugin\my_plugin
+```
+
+* Run the following command sequence in PowerShell at the root directory of the project:
+
+```powershell
+# Batch-decompile all files from bytecode
+python auto_decompile.py
+```
+
+* Synchronize the decompiled source code to the plugin's working directory.
+
+```powershell
+python replace_decompiled.py
+```
+
+---
+
+## 3. Operating Principle of the Decompiler (`decompiler.py`)
+
+The decompiler operates based on static analysis combined with simulating the Ruby YARV virtual machine (Ruby 2.7):
+
+### 3.1. Instruction Sequence (ISeq) Parsing
+* Extracts metadata of methods/classes from the dumped bytecode file, including: the local variable table (`local_table`), the exception handling table (`catch_table`), the number of input parameters, and the detailed list of bytecode instructions.
+
+### 3.2. Stack Simulation
+* Since Ruby YARV is a Stack-based VM, the decompiler maintains a simulated `stack` (containing strings of Ruby expressions).
+* For each bytecode instruction, the decompiler simulates the corresponding push or pop behavior:
+  * `putobject "hello"`: Pushes `"hello"` onto the stack.
+  * `getlocal_WC_0 3`: Reads the variable name at the 3rd position in the local variable table and pushes it onto the stack.
+  * `opt_plus`: Pops two expressions `a` and `b` from the stack and pushes the combined expression `"(a + b)"` back onto the stack.
+
+### 3.3. Control Flow Reconstruction
+* When encountering branching or jumping instructions (`jump`, `branchunless`, `branchif`, `branchnil`), the decompiler does not translate linearly but switches to recursively translating the branches using the `translate_range` function:
+  * Creates clones of the simulated stack for the `then` branch and the `else` branch.
+  * Performs a trial translation (lookahead) to determine the convergence point of the branches.
+  * Assembles the branches into corresponding Ruby control structures: `if/else/end`, ternary operator (`cond ? a : b`), short-circuit logic operators (`&&`, `||`), or safe navigation (`&.`).
+
+### 3.4. Recursive Decompilation of Blocks & Sub-methods
+* For instructions defining blocks (`send` with an ISeq block) or defining methods (`definemethod`), the decompiler makes recursive calls to recover the source code of that block/method, then attaches them to the parent context using Ruby's block syntax (`do ... end` or `{ ... }`).
+
+---
+
+## 4. Operating Principle of the Bytecode Extractor (`dumper.c`)
+
+To obtain the raw bytecode disassembly from encrypted or compressed Ruby files (which cannot be read directly), the project uses an extractor written in C (`dumper.c` compiled into `dumper.so`):
+
+### 4.1. API Hooking Technique
+* Uses the **MinHook** library to directly intervene in the export table of the Ruby 2.7 virtual machine DLL (`x64-msvcrt-ruby270.dll`).
+* Hooks the internal function **`rb_iseq_eval`** — the function that the Ruby virtual machine is forced to call when starting to execute a newly loaded ISeq (Instruction Sequence) in memory.
+
+### 4.2. Recursive Bytecode Extraction (Disassembly Extraction)
+* When `rb_iseq_eval` is triggered, the hook function `my_rb_iseq_eval` temporarily intercepts the control flow and passes the `iseq` pointer structure (type `rb_iseq_t*`) to the internal function **`rb_iseq_disasm`**.
+* `rb_iseq_disasm` converts the entire binary ISeq data structure in RAM into an assembly text string describing each VM instruction in detail (YARV Assembly format).
+* The dumper writes this string directly to the **`dumped_code.txt`** log file.
+
+### 4.3. Ensuring Transparent Execution
+* After extracting and logging, the dumper calls the original function back via the `original_rb_iseq_eval(iseq)` pointer.
+* This makes the extraction process completely transparent, without interrupting or crashing the Ruby virtual machine, allowing the plugin to run normally while its entire hidden source code is exposed in assembly format.
