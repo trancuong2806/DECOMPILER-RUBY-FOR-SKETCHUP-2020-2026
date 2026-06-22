@@ -21,6 +21,7 @@
   - `instructions`: List of instructions (opcodes) and corresponding arguments.
   - `catch_table`: Exception handling table (stores `rescue`, `ensure` blocks).
   - `children`: List of child `ISeq`s (representing inner `block`s, `def` methods, or nested `class`es).
+
 *Logic: Designed as a Tree Node model, suitable for recursively analyzing Ruby's nested structures.*
 
 ---
