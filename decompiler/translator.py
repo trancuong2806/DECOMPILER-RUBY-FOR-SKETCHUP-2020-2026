@@ -17,165 +17,17 @@ def translate_iseq(iseq, all_iseqs):
             flat_lines.extend(line.splitlines())
         return "\n".join(f"{indent}{l}" for l in flat_lines)
 
-    offset_to_idx = {instr['offset']: idx for idx, instr in enumerate(iseq.instructions)}
+    from .core.context import TranslationContext
+    from .core.branching import BranchAnalyzer
     
-    # Pre-scan for backward branches to identify loop headers
-    backward_branches = {} # start_idx -> list of branch_idx
-    for idx, instr in enumerate(iseq.instructions):
-        op = instr['op']
-        if op in ('branchif', 'branchunless', 'branchnil', 'jump'):
-            try:
-                target_offset = int(instr['args'].split()[-1])
-                target_idx = offset_to_idx.get(target_offset)
-                if target_idx is not None and target_idx < idx:
-                    backward_branches.setdefault(target_idx, []).append(idx)
-            except (ValueError, IndexError):
-                pass
+    ctx = TranslationContext(iseq, all_iseqs)
     
-    # Precompute static child mappings to avoid dynamic state / lookahead side effects
-    child_matches = {}
-    for child in iseq.children:
-        child_matches.setdefault(child.name, []).append(child)
-        
-    child_counts = {}
-    pc_to_child = {}
-    for idx, instr in enumerate(iseq.instructions):
-        op = instr['op']
-        args = instr['args']
-        child_name = None
-        if op == 'defineclass':
-            parts = args.split(', ')
-            if len(parts) >= 2:
-                child_name = parts[1].strip()
-        elif op in ('definemethod', 'definesmethod'):
-            parts = args.split(', ')
-            if len(parts) >= 2:
-                child_name = parts[1].strip()
-        elif op == 'send':
-            parts = args.split(', ')
-            block_name = parts[-1].strip()
-            if block_name in child_matches:
-                child_name = block_name
-                
-        if child_name:
-            matches = child_matches.get(child_name, [])
-            count = child_counts.get(child_name, 0)
-            child_counts[child_name] = count + 1
-            if count < len(matches):
-                pc_to_child[idx] = matches[count]
-            else:
-                pc_to_child[idx] = all_iseqs.get(child_name)
-
-    resolved_counts = {}
-    def resolve_child(name, pc=None):
-        if pc is not None and pc in pc_to_child:
-            return pc_to_child[pc]
-        count = resolved_counts.get(name, 0)
-        resolved_counts[name] = count + 1
-        matches = [c for c in iseq.children if c.name == name]
-        if count < len(matches):
-            return matches[count]
-        return all_iseqs.get(name)
-
-    is_block_or_class = ("block" in iseq.name) or iseq.name.startswith("<class:") or iseq.name.startswith("<module:")
-    is_class_or_module = iseq.name.startswith("<class:") or iseq.name.startswith("<module:")
-
-    def get_simple_return_val(target_idx, cond=None):
-        if is_class_or_module:
-            return None
-        if target_idx < 0 or target_idx >= len(iseq.instructions):
-            return None
-        scan_idx = target_idx
-        block_instrs = []
-        has_setn = False
-        while scan_idx < len(iseq.instructions):
-            instr = iseq.instructions[scan_idx]
-            op = instr['op']
-            if op in ('jump', 'branchif', 'branchunless', 'branchnil', 'opt_case_dispatch', 'newhash', 'newarray', 'duparray', 'duphash'):
-                return None
-            if op == 'invokeblock' or (op in ('send', 'opt_send_without_block', 'invokesuper') and 'block:' in instr['args']):
-                return None
-            if op == 'setn':
-                has_setn = True
-                
-            block_instrs.append(instr)
-            if op == 'leave':
-                break
-            scan_idx += 1
-            if len(block_instrs) > 4:
-                return None
-        if not block_instrs or block_instrs[-1]['op'] != 'leave':
-            return None
-        
-        if has_setn and cond:
-            offsets = [instr['offset'] for instr in block_instrs]
-            return cond, offsets
-            
-        # Backup resolved_counts to prevent dynamic side-effects during look-ahead
-        saved_counts = resolved_counts.copy()
-        sub_stack = []
-        translate_range(target_idx, target_idx + len(block_instrs) - 1, sub_stack, pop_final=False)
-        resolved_counts.clear()
-        resolved_counts.update(saved_counts)
-        
-        offsets = [instr['offset'] for instr in block_instrs]
-        if sub_stack:
-            return sub_stack[-1], offsets
-        return 'nil', offsets
-
-    def get_early_return_val(start_idx, end_idx):
-        if is_class_or_module:
-            return None
-        if start_idx > end_idx or start_idx < 0 or end_idx >= len(iseq.instructions):
-            return None
-        scan_idx = start_idx
-        block_instrs = []
-        while scan_idx <= end_idx:
-            instr = iseq.instructions[scan_idx]
-            op = instr['op']
-            if op in ('jump', 'branchif', 'branchunless', 'branchnil', 'opt_case_dispatch', 'newhash', 'newarray', 'duparray', 'duphash'):
-                return None
-            if op == 'invokeblock' or (op in ('send', 'opt_send_without_block', 'invokesuper') and 'block:' in instr['args']):
-                return None
-                
-            block_instrs.append(instr)
-            if op == 'leave':
-                if scan_idx == end_idx:
-                    break
-                else:
-                    return None
-            scan_idx += 1
-            if len(block_instrs) > 4:
-                return None
-        if not block_instrs or block_instrs[-1]['op'] != 'leave':
-            return None
-            
-        # Backup resolved_counts to prevent dynamic side-effects during look-ahead
-        saved_counts = resolved_counts.copy()
-        sub_stack = []
-        translate_range(start_idx, end_idx, sub_stack, pop_final=False)
-        resolved_counts.clear()
-        resolved_counts.update(saved_counts)
-        
-        if sub_stack:
-            return sub_stack[-1]
-        return 'nil'
-
-    def is_early_return_path(start_idx, end_idx):
-        if is_class_or_module:
-            return False
-        if start_idx > end_idx or start_idx < 0 or end_idx >= len(iseq.instructions):
-            return False
-        scan_idx = start_idx
-        while scan_idx <= end_idx:
-            instr = iseq.instructions[scan_idx]
-            op = instr['op']
-            if op in ('jump', 'branchif', 'branchunless', 'branchnil', 'opt_case_dispatch', 'newhash', 'newarray', 'duparray', 'duphash'):
-                return False
-            if op == 'leave':
-                return scan_idx == end_idx
-            scan_idx += 1
-        return False
+    offset_to_idx = ctx.offset_to_idx
+    backward_branches = ctx.backward_branches
+    resolved_counts = ctx.resolved_counts
+    resolve_child = ctx.resolve_child
+    is_class_or_module = ctx.is_class_or_module
+    is_block_or_class = ctx.is_block_or_class
     
     def translate_range(start_idx, end_idx, stack, pop_final=True, is_root=False, ignored_catches=None):
         if ignored_catches is None:
@@ -192,86 +44,7 @@ def translate_iseq(iseq, all_iseqs):
                 return
             statements.append(strip_outer_parens(stmt))
             
-        def merge_compound_branches(start_pc, start_cond):
-            current_pc = start_pc
-            current_cond = start_cond
-            
-            instr = iseq.instructions[current_pc]
-            current_op = instr['op']
-            current_target_offset = int(instr['args'].split()[-1])
-            current_target_idx = offset_to_idx.get(current_target_offset)
-            if current_target_idx is None:
-                return current_cond, current_op, current_target_idx, current_pc
-                
-            while True:
-                inner_pc = -1
-                for idx in range(current_pc + 1, min(current_target_idx, end_idx)):
-                    if iseq.instructions[idx]['op'] in ('branchif', 'branchunless', 'branchnil'):
-                        inner_pc = idx
-                        break
-                
-                if inner_pc == -1:
-                    break
-                    
-                inner_instr = iseq.instructions[inner_pc]
-                inner_op = inner_instr['op']
-                inner_target_offset = int(inner_instr['args'].split()[-1])
-                inner_target_idx = offset_to_idx.get(inner_target_offset)
-                if inner_target_idx is None:
-                    break
-                    
-                is_fallthrough = True
-                for idx in range(inner_pc + 1, current_target_idx):
-                    if iseq.instructions[idx]['op'] != 'nop':
-                        is_fallthrough = False
-                        break
-                        
-                merge_match = False
-                operator = ""
-                new_op = ""
-                new_target = -1
-                new_pc = -1
-                
-                if current_op == 'branchif' and inner_op == 'branchunless' and is_fallthrough:
-                    merge_match = True
-                    operator = "||"
-                    new_op = "branchunless"
-                    new_target = inner_target_idx
-                    new_pc = current_target_idx - 1
-                elif current_op == 'branchunless' and inner_op == 'branchunless' and current_target_idx == inner_target_idx:
-                    merge_match = True
-                    operator = "&&"
-                    new_op = "branchunless"
-                    new_target = current_target_idx
-                    new_pc = inner_pc
-                elif current_op == 'branchunless' and inner_op == 'branchif' and is_fallthrough:
-                    merge_match = True
-                    operator = "&&"
-                    new_op = "branchif"
-                    new_target = inner_target_idx
-                    new_pc = inner_pc
-                elif current_op == 'branchif' and inner_op == 'branchif' and current_target_idx == inner_target_idx:
-                    merge_match = True
-                    operator = "||"
-                    new_op = "branchif"
-                    new_target = current_target_idx
-                    new_pc = inner_pc
-                    
-                if merge_match and new_pc > current_pc:
-                    inner_stack = list(stack)
-                    setup_stmts = translate_range(current_pc + 1, inner_pc, inner_stack, pop_final=False)
-                    for stmt in setup_stmts:
-                        append_statement(stmt)
-                    cond2 = inner_stack[-1] if inner_stack else '<empty_cond>'
-                    
-                    current_cond = f"({current_cond} {operator} {cond2})"
-                    current_op = new_op
-                    current_target_idx = new_target
-                    current_pc = new_pc
-                else:
-                    break
-                    
-            return current_cond, current_op, current_target_idx, current_pc
+        analyzer = BranchAnalyzer(ctx, translate_range)
 
         pc = start_idx
         while pc < end_idx:
@@ -1039,7 +812,7 @@ def translate_iseq(iseq, all_iseqs):
                 cond = strip_outer_parens(stack.pop() if stack else '<empty_cond>')
                 
                 # Merge compound branches if possible
-                merged_cond, merged_op, merged_target_idx, merged_pc = merge_compound_branches(pc, cond)
+                merged_cond, merged_op, merged_target_idx, merged_pc = analyzer.merge_compound_branches(pc, cond, end_idx, append_statement)
                 cond = merged_cond
                 op = merged_op
                 target_idx = merged_target_idx
@@ -1050,7 +823,7 @@ def translate_iseq(iseq, all_iseqs):
                 
                 if op in ('branchunless', 'branchnil'):
                     # Check for early return in non-jumping path
-                    early_ret = get_early_return_val(pc + 1, target_idx - 1) if target_idx > pc + 1 else None
+                    early_ret = analyzer.get_early_return_val(pc + 1, target_idx - 1) if target_idx > pc + 1 else None
                     if early_ret is not None:
                         if early_ret != 'nil':
                             if early_ret.startswith(('raise', 'exit')):
@@ -1060,8 +833,8 @@ def translate_iseq(iseq, all_iseqs):
                         else:
                             append_statement(f"{keyword} if {cond}")
                         pc = target_idx - 1
-                    elif get_simple_return_val(target_idx, cond) is not None:
-                        ret_val, ret_offsets = get_simple_return_val(target_idx, cond)
+                    elif analyzer.get_simple_return_val(target_idx, cond) is not None:
+                        ret_val, ret_offsets = analyzer.get_simple_return_val(target_idx, cond)
                         if ret_val != 'nil':
                             if ret_val.startswith(('raise', 'exit')):
                                 append_statement(f"{ret_val} unless {cond}")
@@ -1070,7 +843,7 @@ def translate_iseq(iseq, all_iseqs):
                         else:
                             append_statement(f"{keyword} unless {cond}")
                         skipped_offsets.update(ret_offsets)
-                    elif target_idx > pc and is_early_return_path(pc + 1, target_idx - 1):
+                    elif target_idx > pc and analyzer.is_early_return_path(pc + 1, target_idx - 1):
                         then_stack = list(stack)
                         then_code = translate_range(pc + 1, target_idx - 1, then_stack, pop_final=False)
                         then_val = then_stack[-1] if len(then_stack) > len(stack) else 'nil'
@@ -1213,7 +986,7 @@ def translate_iseq(iseq, all_iseqs):
                         
                 elif op == 'branchif':
                     # Check for early return in non-jumping path
-                    early_ret = get_early_return_val(pc + 1, target_idx - 1) if target_idx > pc + 1 else None
+                    early_ret = analyzer.get_early_return_val(pc + 1, target_idx - 1) if target_idx > pc + 1 else None
                     if early_ret is not None:
                         if early_ret != 'nil':
                             if early_ret.startswith(('raise', 'exit')):
@@ -1223,8 +996,8 @@ def translate_iseq(iseq, all_iseqs):
                         else:
                             append_statement(f"{keyword} unless {cond}")
                         pc = target_idx - 1
-                    elif get_simple_return_val(target_idx, cond) is not None:
-                        ret_val, ret_offsets = get_simple_return_val(target_idx, cond)
+                    elif analyzer.get_simple_return_val(target_idx, cond) is not None:
+                        ret_val, ret_offsets = analyzer.get_simple_return_val(target_idx, cond)
                         if ret_val != 'nil':
                             if ret_val.startswith(('raise', 'exit')):
                                 append_statement(f"{ret_val} if {cond}")

@@ -91,7 +91,10 @@
 ## 5. Thư mục `decompiler/core/` - Kiến trúc tách rời / Decoupled Core
 
 **🇻🇳 Tiếng Việt:**
-**Chức năng:** Chứa logic nghiệp vụ được bóc tách từ `translator.py` nhằm giảm độ phức tạp và dễ bảo trì.
+**Chức năng:** Chứa logic nghiệp vụ được bóc tách từ `translator.py` nhằm giảm độ phức tạp và dễ bảo trì. Kiến trúc này được thiết kế theo hướng đối tượng (OOP) để duy trì trạng thái (State) an toàn.
+- **`core/context.py` (Mới):** Lưu trữ class `TranslationContext`.
+  - Bọc tất cả các biến toàn cục và bảng ánh xạ (mapping tables) của một tiến trình dịch ngược `ISeq` như `offset_to_idx`, `resolved_counts`, `backward_branches`.
+  - Thay vì khai báo rải rác các biến cục bộ bên trong hàm `translate_iseq`, nó gộp thành một đối tượng `ctx` duy nhất để dễ dàng truyền vào các module khác.
 - **`core/handlers.py`**: Xử lý các Opcodes thuần tuý về mặt dữ liệu và thao tác ngăn xếp (Stack Manipulation).
   - Chứa hàm `handle_simple_op(op, args, stack, append_statement)`.
   - **Logic hoạt động bên trong:**
@@ -99,14 +102,18 @@
     2. **Tối ưu cú pháp:** Sử dụng `strip_outer_parens` để bóc tách ngoặc đơn thừa trước khi ghép chuỗi, ngăn ngừa việc tạo ra các biểu thức bị lồng ngoặc quá sâu như `(((a + b) + c))`.
     3. **Đẩy kết quả (Push):** Ghép nối thành biểu thức Ruby hợp lệ (ví dụ `f"({lhs} + {rhs})"`) và đẩy ngược lại vào `stack`.
     4. **Tín hiệu điều khiển:** Hàm trả về `True` nếu đã xử lý thành công Opcode, giúp vòng lặp chính ở `translator.py` biết và bỏ qua (continue) việc kiểm tra các lệnh khác. Trả về `False` nếu đây là một Opcode phức tạp.
-  - Hàm này bao thầu toàn bộ hàng chục Opcodes liên quan đến toán học (`opt_plus`, `opt_minus`, `opt_mult`), xử lý mảng/hash (`newarray`, `newhash`, `expandarray`), các phép so sánh (`opt_eq`, `opt_lt`, `opt_gt`), và các phép gán biến đổi trực tiếp trên Stack (`checktype`, `tostring`, `concatstrings`).
-  - Việc tách rời module này giúp gỡ bỏ hơn 200 dòng code thừa thãi khỏi bộ máy chính, giúp dễ dàng kiểm thử các lệnh thao tác mảng/toán học mà không lo phá hỏng luồng Control Flow (if/else/loops).
-- **`core/branching.py`** & **`core/__init__.py`**: Cấu trúc thiết kế mở giúp cô lập thêm các thuật toán "Look-ahead" (nhìn trước rẽ nhánh) của Decompiler sau này.
+- **`core/branching.py`**: Xử lý các thuật toán Look-ahead và mô phỏng nhánh (Branch Simulation).
+  - Khai báo class `BranchAnalyzer` nhận vào đối tượng `TranslationContext` ở trên.
+  - Chứa các hàm dò đường rẽ nhánh siêu phức tạp như `get_simple_return_val`, `get_early_return_val` và đặc biệt là thuật toán gộp nhánh `merge_compound_branches`.
+  - Các hàm này có thể gọi ngược lại thuật toán đệ quy gốc (`translate_range`) để giả lập dịch thử nhánh `then` và `else` xem kết quả có rớt vào cùng một điểm đến không (short-circuit logic: `||`, `&&`).
 
-*Nhận xét logic:* Việc truyền tham chiếu list (`stack`) từ bộ máy chính `translator.py` vào `handlers.py` là một mô hình thiết kế tối ưu trong Python vì list là dạng truyền tham chiếu (pass by reference), giúp thay đổi được trạng thái ngăn xếp mà không cần phải nhúng toàn bộ kiến trúc Object Oriented Programming (OOP) rườm rà.
+*Nhận xét logic:* Kiến trúc đã được chuyển từ Functional (với Closure phình to khổng lồ) sang mô hình Object-Oriented State (Context Object Pattern) kết hợp hàm con. Điều này giúp chia nhỏ file `translator.py` từ gần 1700 dòng xuống một cấu trúc dễ đọc, module hóa cực cao nhưng vẫn bảo toàn tuyệt đối nguyên lý hoạt động của luồng Control Flow gốc.
 
 **🇬🇧 English:**
-**Function:** Contains business logic extracted from `translator.py` to reduce complexity and improve maintainability.
+**Function:** Contains business logic extracted from `translator.py` to reduce complexity and improve maintainability. This architecture is designed in an Object-Oriented (OOP) manner to safely maintain State.
+- **`core/context.py` (New):** Hosts the `TranslationContext` class.
+  - Encapsulates all global variables and mapping tables of a single `ISeq` decompilation process such as `offset_to_idx`, `resolved_counts`, `backward_branches`.
+  - Instead of scattering local variables inside the `translate_iseq` closure, it packages them into a single `ctx` object to easily pass into other modules.
 - **`core/handlers.py`**: Handles pure data and stack-oriented Opcodes (Stack Manipulation).
   - Contains the function `handle_simple_op(op, args, stack, append_statement)`.
   - **Internal Logic Flow:**
@@ -114,11 +121,12 @@
     2. **Syntax Optimization:** Uses `strip_outer_parens` to peel off redundant parentheses before formatting, preventing heavily nested expressions like `(((a + b) + c))`.
     3. **Result Insertion (Push):** Formats a valid Ruby expression (e.g., `f"({lhs} + {rhs})"`) and pushes it back onto the `stack`.
     4. **Control Signal:** Returns `True` if it successfully handled the Opcode, signaling the main loop in `translator.py` to skip further checks. Returns `False` if it's a complex Opcode requiring Orchestrator handling.
-  - This function covers dozens of Opcodes related to mathematics (`opt_plus`, `opt_minus`, `opt_mult`), array/hash manipulation (`newarray`, `newhash`, `expandarray`), comparisons (`opt_eq`, `opt_lt`, `opt_gt`), and direct stack mutating assignments (`checktype`, `tostring`, `concatstrings`).
-  - Decoupling this module removes over 200 lines of boilerplate from the main engine, making it easy to test array/math manipulation commands without breaking the highly complex Control Flow (if/else/loops).
-- **`core/branching.py`** & **`core/__init__.py`**: An open design structure to further isolate "Look-ahead" branching algorithms of the Decompiler in the future.
+- **`core/branching.py`**: Handles Look-ahead algorithms and Branch Simulation.
+  - Declares the `BranchAnalyzer` class which injects the `TranslationContext` object.
+  - Contains highly complex branch tracing functions like `get_simple_return_val`, `get_early_return_val`, and specifically the compound branch merging algorithm `merge_compound_branches`.
+  - These functions can callback to the original recursive algorithm (`translate_range`) to simulate translating `then` and `else` branches to see if they fall through to the same target (short-circuit logic: `||`, `&&`).
 
-*Logic Observation:* Passing the list reference (`stack`) from the main engine `translator.py` to `handlers.py` is an optimal design pattern in Python because lists are passed by reference, allowing the stack state to be modified without needing to embed a cumbersome full Object Oriented Programming (OOP) architecture.
+*Logic Observation:* The architecture has transitioned from a Functional approach (with a massive Closure) to an Object-Oriented State model (Context Object Pattern) combined with sub-functions. This successfully shrinks `translator.py` from nearly 1700 lines down to a highly modularized structure while perfectly preserving the original behavior of the Control Flow.
 
 ---
 

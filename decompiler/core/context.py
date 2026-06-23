@@ -1,25 +1,14 @@
-
 class TranslationContext:
     def __init__(self, iseq, all_iseqs):
         self.iseq = iseq
         self.all_iseqs = all_iseqs
         self.offset_to_idx = {instr['offset']: idx for idx, instr in enumerate(iseq.instructions)}
         self.resolved_counts = {}
-        self.skipped_offsets = set()
-        self.defaults = {}
         
-        self.backward_branches = {}
-        for idx, instr in enumerate(iseq.instructions):
-            op = instr['op']
-            if op in ('branchif', 'branchunless', 'branchnil', 'jump'):
-                try:
-                    target_offset = int(instr['args'].split()[-1])
-                    target_idx = self.offset_to_idx.get(target_offset)
-                    if target_idx is not None and target_idx < idx:
-                        self.backward_branches.setdefault(target_idx, []).append(idx)
-                except (ValueError, IndexError):
-                    pass
-                    
+        self.is_block_or_class = ("block" in iseq.name) or iseq.name.startswith("<class:") or iseq.name.startswith("<module:")
+        self.is_class_or_module = iseq.name.startswith("<class:") or iseq.name.startswith("<module:")
+        
+        # Precompute static child mappings to avoid dynamic state / lookahead side effects
         self.child_matches = {}
         for child in iseq.children:
             self.child_matches.setdefault(child.name, []).append(child)
@@ -52,10 +41,20 @@ class TranslationContext:
                     self.pc_to_child[idx] = matches[count]
                 else:
                     self.pc_to_child[idx] = all_iseqs.get(child_name)
-                    
-        self.is_block_or_class = ("block" in iseq.name) or iseq.name.startswith("<class:") or iseq.name.startswith("<module:")
-        self.is_class_or_module = iseq.name.startswith("<class:") or iseq.name.startswith("<module:")
-        
+
+        # Pre-scan for backward branches to identify loop headers
+        self.backward_branches = {} # start_idx -> list of branch_idx
+        for idx, instr in enumerate(iseq.instructions):
+            op = instr['op']
+            if op in ('branchif', 'branchunless', 'branchnil', 'jump'):
+                try:
+                    target_offset = int(instr['args'].split()[-1])
+                    target_idx = self.offset_to_idx.get(target_offset)
+                    if target_idx is not None and target_idx < idx:
+                        self.backward_branches.setdefault(target_idx, []).append(idx)
+                except (ValueError, IndexError):
+                    pass
+
     def resolve_child(self, name, pc=None):
         if pc is not None and pc in self.pc_to_child:
             return self.pc_to_child[pc]
